@@ -1,0 +1,211 @@
+Transform: AWS::Serverless-2016-10-31
+Description: AWS SAM template to deploy system to process CloudFront realtime logs and upload as custom CloudWatch metrics
+Parameters:
+  KinesisShardCount:
+    Description: Sets the shard count for data stream. To calculate this, add 1 Kinesis shard per 1000 requests that your CloudFront distribution receives in a second.
+    Type: Number
+    Default: 5
+    MinValue: 1
+    ConstraintDescription: KinesisShardCount must be an integer
+
+  CloudFrontDistributionDomainName:
+    Description: The domain name of the CloudFront distribution for which to process real-time logs. This should be similar to "dlhpsvkl3h8ev.cloudfront.net"
+    Type: String
+    AllowedPattern: ".*\\.cloudfront\\.net$"
+    ConstraintDescription: CloudFrontDistributionDomainName must end in ".cloudfront.net"
+
+Resources:
+#################################################################
+# METRIC_PUT Lambda, Permission, IAM Role
+#################################################################
+  MetricPutLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Takes metrics from DynamoDB and puts them into Cloudwatch
+      Runtime: python3.8
+      CodeUri: ../src/metric_put/
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt 'MetricPutLambdaExecutionIamRole.Arn'
+      Environment:
+        Variables:
+            LOGGING_LEVEL: INFO
+            DYNAMODB_TABLE: !Ref 'LoggingAggregationTable'
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 3600
+
+  MetricPutLambdaPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt 'MetricPutLambda.Arn'
+      Principal: events.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn: !GetAtt 'MetricPutEventBridgeRule.Arn'
+
+  MetricPutLambdaExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Created for metric_put Lambda
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: DynamoDBPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !GetAtt 'LoggingAggregationTable.Arn'
+        - PolicyName: CloudWatchMetricsPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+#################################################################
+# RECORD_PROCESSOR Lambda, IAM Role
+#################################################################
+  RecordProcessorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Takes metrics from Kinesis data stream
+      Runtime: python3.8
+      CodeUri: ../src/record_processor/
+      Handler: lambda_function.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt 'RecordProcessorLambdaExecutionIamRole.Arn'
+      Environment:
+          Variables:
+              LOGGING_LEVEL: INFO
+              DYNAMODB_TABLE: !Ref 'LoggingAggregationTable'
+      Events:
+        CloudfrontRealtimeLoggingStream:
+          Type: Kinesis
+          Properties:
+            BatchSize: 100
+            Enabled: TRUE
+            MaximumBatchingWindowInSeconds: 1
+            MaximumRecordAgeInSeconds: -1
+            MaximumRetryAttempts: 3
+            ParallelizationFactor: 10
+            StartingPosition: TRIM_HORIZON
+            Stream: !GetAtt 'CloudfrontRealtimeLoggingStream.Arn'
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 3600
+
+  RecordProcessorLambdaExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Created for record_processor Lambda
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: DynamoDBPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt LoggingAggregationTable.Arn
+
+#################################################################
+# METRIC_PUT EventBridge Rule
+#################################################################
+  MetricPutEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub 'Rule to trigger put_metric Lambda to PutMetricData in CloudWatch for ${CloudFrontDistributionDomainName}'
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'MetricPutLambda.Arn'
+          Id: !Ref 'MetricPutLambda'
+          InputTransformer:
+            InputPathsMap:
+              timestamp: "$.time"
+            InputTemplate: !Sub '"{\"timestamp\": \"<timestamp>\", \"distribution\": \"${CloudFrontDistributionDomainName}\"}"'
+
+#################################################################
+# Kinesis Data Stream
+#################################################################
+  CloudfrontRealtimeLoggingStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      RetentionPeriodHours: 24
+      ShardCount: !Ref 'KinesisShardCount'
+
+#################################################################
+# Logging Aggregation DynamoDB Table
+#################################################################
+  LoggingAggregationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+          -
+            AttributeName: timestamp.distribution
+            AttributeType: S
+          -
+            AttributeName: edgelocation.statuscode
+            AttributeType: S
+      KeySchema:
+          -
+            AttributeName: timestamp.distribution
+            KeyType: HASH
+          -
+            AttributeName: edgelocation.statuscode
+            KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: True
+      SSESpecification:
+        SSEEnabled: TRUE
+
+#################################################################
+# Outputs
+#################################################################
+Outputs:
+  KinesisDataStreamArn:
+    Description: ARN of the Kinesis Data Stream
+    Value: !GetAtt 'CloudfrontRealtimeLoggingStream.Arn'
+  MetricPutLambdaArn:
+    Description: ARN of the MetricPut Lambda
+    Value: !GetAtt 'MetricPutLambda.Arn'
+  RecordProcessorLambdaArn:
+    Description: ARN of the RecordProcessor Lambda
+    Value: !GetAtt 'MetricPutLambda.Arn'
+  LoggingAggregationTable:
+    Description: ARN of DynamoDB Table
+    Value: !GetAtt 'LoggingAggregationTable.Arn'
+  MetricPutEventBridgeRule:
+    Description: ARN of EventBridge Rule
+    Value: !GetAtt 'MetricPutEventBridgeRule.Arn'
