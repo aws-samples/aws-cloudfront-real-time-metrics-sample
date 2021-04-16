@@ -2,6 +2,8 @@
 
 This repository contains sample code to create infrastructure to parse [CloudFront real-time logs](https://aws.amazon.com/about-aws/whats-new/2020/08/cloudfront-realtimelogs/). This infrastructure will use data from CloudFront real-time logs and upload it to [CloudWatch](https://aws.amazon.com/cloudwatch/) as custom metrics. These custom metrics in CloudWatch can provide low-level insight into how well a CloudFront distribution is performing and even enable monitoring the operational health of [specific CloudFront edge locations](https://aws.amazon.com/cloudfront/features/). This can assist in the identification of common problems affecting CloudFront distributions such as localized outages, ISP failures, and DNS routing issues. This code is used as part of a an AWS blog, which can be referenced here.
 
+![Overview](/images/overview.png)
+
 ## Deploying the Code
 
 This repository is intended to be a companion to an AWS blog. You should review this blog prior to using code from this repository. An AWS SAM template in this repository provides deployment capabilities for this project. To deploy this project, follow the steps below:

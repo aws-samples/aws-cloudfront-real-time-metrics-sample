@@ -16,67 +16,6 @@ Parameters:
 
 Resources:
 #################################################################
-# METRIC_PUT Lambda, Permission, IAM Role
-#################################################################
-  MetricPutLambda:
-    Type: AWS::Serverless::Function
-    Properties:
-      Description: Takes metrics from DynamoDB and puts them into Cloudwatch
-      Runtime: python3.8
-      CodeUri: ../src/metric_put/
-      Handler: lambda_function.lambda_handler
-      MemorySize: 256
-      Timeout: 30
-      Role: !GetAtt 'MetricPutLambdaExecutionIamRole.Arn'
-      Environment:
-        Variables:
-            LOGGING_LEVEL: INFO
-            DYNAMODB_TABLE: !Ref 'LoggingAggregationTable'
-      EventInvokeConfig:
-        MaximumEventAgeInSeconds: 3600
-
-  MetricPutLambdaPermissions:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt 'MetricPutLambda.Arn'
-      Principal: events.amazonaws.com
-      Action: lambda:InvokeFunction
-      SourceArn: !GetAtt 'MetricPutEventBridgeRule.Arn'
-
-  MetricPutLambdaExecutionIamRole:
-    Type: AWS::IAM::Role
-    Properties:
-      Description: Created for metric_put Lambda
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - 'sts:AssumeRole'
-      Policies:
-        - PolicyName: DynamoDBPermissions
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - dynamodb:Query
-                Resource: !GetAtt 'LoggingAggregationTable.Arn'
-        - PolicyName: CloudWatchMetricsPermissions
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                Resource: "*"
-
-#################################################################
 # RECORD_PROCESSOR Lambda, IAM Role
 #################################################################
   RecordProcessorLambda:
@@ -87,22 +26,21 @@ Resources:
       CodeUri: ../src/record_processor/
       Handler: lambda_function.lambda_handler
       MemorySize: 256
-      Timeout: 30
+      Timeout: 60
       Role: !GetAtt 'RecordProcessorLambdaExecutionIamRole.Arn'
       Environment:
           Variables:
               LOGGING_LEVEL: INFO
-              DYNAMODB_TABLE: !Ref 'LoggingAggregationTable'
       Events:
         CloudfrontRealtimeLoggingStream:
           Type: Kinesis
           Properties:
-            BatchSize: 100
+            BatchSize: 10000
             Enabled: TRUE
-            MaximumBatchingWindowInSeconds: 1
+            MaximumBatchingWindowInSeconds: 60
             MaximumRecordAgeInSeconds: -1
             MaximumRetryAttempts: 3
-            ParallelizationFactor: 10
+            ParallelizationFactor: 1
             StartingPosition: TRIM_HORIZON
             Stream: !GetAtt 'CloudfrontRealtimeLoggingStream.Arn'
       EventInvokeConfig:
@@ -124,35 +62,14 @@ Resources:
             Action:
               - 'sts:AssumeRole'
       Policies:
-        - PolicyName: DynamoDBPermissions
+        - PolicyName: CloudWatchMetricsPermissions
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
-                  - dynamodb:BatchWriteItem
-                  - dynamodb:PutItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Query
-                  - dynamodb:UpdateItem
-                Resource: !GetAtt LoggingAggregationTable.Arn
-
-#################################################################
-# METRIC_PUT EventBridge Rule
-#################################################################
-  MetricPutEventBridgeRule:
-    Type: AWS::Events::Rule
-    Properties:
-      Description: !Sub 'Rule to trigger put_metric Lambda to PutMetricData in CloudWatch for ${CloudFrontDistributionDomainName}'
-      ScheduleExpression: rate(1 minute)
-      State: ENABLED
-      Targets:
-        - Arn: !GetAtt 'MetricPutLambda.Arn'
-          Id: !Ref 'MetricPutLambda'
-          InputTransformer:
-            InputPathsMap:
-              timestamp: "$.time"
-            InputTemplate: !Sub '"{\"timestamp\": \"<timestamp>\", \"distribution\": \"${CloudFrontDistributionDomainName}\"}"'
+                  - cloudwatch:PutMetricData
+                Resource: "*"
 
 #################################################################
 # Kinesis Data Stream
@@ -164,48 +81,13 @@ Resources:
       ShardCount: !Ref 'KinesisShardCount'
 
 #################################################################
-# Logging Aggregation DynamoDB Table
-#################################################################
-  LoggingAggregationTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-          -
-            AttributeName: timestamp.distribution
-            AttributeType: S
-          -
-            AttributeName: edgelocation.statuscode
-            AttributeType: S
-      KeySchema:
-          -
-            AttributeName: timestamp.distribution
-            KeyType: HASH
-          -
-            AttributeName: edgelocation.statuscode
-            KeyType: RANGE
-      BillingMode: PAY_PER_REQUEST
-      TimeToLiveSpecification:
-        AttributeName: ttl
-        Enabled: True
-      SSESpecification:
-        SSEEnabled: TRUE
-
-#################################################################
 # Outputs
 #################################################################
 Outputs:
   KinesisDataStreamArn:
     Description: ARN of the Kinesis Data Stream
     Value: !GetAtt 'CloudfrontRealtimeLoggingStream.Arn'
-  MetricPutLambdaArn:
-    Description: ARN of the MetricPut Lambda
-    Value: !GetAtt 'MetricPutLambda.Arn'
+
   RecordProcessorLambdaArn:
     Description: ARN of the RecordProcessor Lambda
-    Value: !GetAtt 'MetricPutLambda.Arn'
-  LoggingAggregationTable:
-    Description: ARN of DynamoDB Table
-    Value: !GetAtt 'LoggingAggregationTable.Arn'
-  MetricPutEventBridgeRule:
-    Description: ARN of EventBridge Rule
-    Value: !GetAtt 'MetricPutEventBridgeRule.Arn'
+    Value: !GetAtt 'RecordProcessorLambda.Arn'
