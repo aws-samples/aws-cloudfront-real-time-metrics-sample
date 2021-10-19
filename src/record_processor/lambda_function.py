@@ -1,7 +1,7 @@
 """
 Module for Kinesis data stream consumer capabilities. This Lambda
 is triggered to process Kinesis records originating from CloudFront
-real-time logs and upload the data to a DynamoDB table.
+real-time logs and publish the data as CloudWatch metrics.
 """
 import os
 import re
